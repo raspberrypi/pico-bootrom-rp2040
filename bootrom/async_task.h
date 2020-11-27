@@ -47,7 +47,7 @@ struct async_task {
     uint32_t erase_size;
     uint8_t *data;
     uint32_t data_length;
-    uint32_t rpiboot_user_token;
+    uint32_t picoboot_user_token;
     uint8_t type;
     uint8_t exclusive_param;
     // an identifier for the logical source of the task
@@ -79,7 +79,7 @@ void __attribute__((noreturn)) async_task_worker();
 void reset_task(struct async_task *task);
 
 extern struct async_task_queue virtual_disk_queue;
-extern struct async_task_queue rpiboot_queue;
+extern struct async_task_queue picoboot_queue;
 
 static inline void async_disable_queue(struct async_task_queue *queue, bool disable) {
     queue->disable = disable;

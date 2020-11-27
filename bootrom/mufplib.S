@@ -26,8 +26,9 @@
 .global mufp_fsub
 .global mufp_fmul
 .global mufp_fdiv
-.global mufp_fcmp
-.global mufp_fcmp_flags
+.global mufp_fcmp_combined
+.global mufp_fcmp_fast
+.global mufp_fcmp_fast_flags
 .global mufp_fsqrt
 .global mufp_float2int
 .global mufp_float2fix
@@ -37,6 +38,10 @@
 .global mufp_fix2float
 .global mufp_uint2float
 .global mufp_ufix2float
+.global mufp_int642float
+.global mufp_fix642float
+.global mufp_uint642float
+.global mufp_ufix642float
 .global mufp_fcos
 .global mufp_fsin
 .global mufp_ftan
@@ -158,31 +163,6 @@ packx0:
  lsls r0,#10
  b 9b
 
-@ unpack two arguments (r0,r1) and shift one down to have common exponent; note that arguments are exchanged
-unpackxyalign:
- push {r14}
- bl unpackx
- bl xchxy
- bl unpackx
- lsls r0,r0,#6  @ Q29
- lsls r1,r1,#6  @ Q29
- subs r4,r2,r3  @ calculate shift
- bge 1f         @ x>=y?
- mov r2,r3      @ no: take common exponent from y
- rsbs r4,#0     @ make shift positive
- asrs r0,r4
- cmp r4,#32
- bhs 2f
- pop {r15}
-1:
- asrs r1,r4
- cmp r4,#32
- bhs 2f
- pop {r15}
-2:
- movs r0,#0    @ large shift, so result is zero
- pop {r15}
-
 .align 2
 .ltorg
 
@@ -213,40 +193,56 @@ mul0:
  bx r14
 
 .thumb_func
-mufp_fcmp:
- movs r2,#1      @ initialise result
- lsls r3,r2,#31  @ r3=0x80000000
- tst r0,r3       @ check sign of first argument
+mufp_fcmp_combined:
+@ *****
+@ WARNING: this code is required by the wrapper functions to preserve R3
+@ *****
+ lsls r2,r0,#1
+ lsrs r2,#24
  beq 1f
- subs r0,r3,r0   @ convert to 2's complement form for direct comparison
+ cmp r2,#0xff
+ bne 2f
 1:
- tst r1,r3       @ repeat for second argument
- beq 2f
- subs r1,r3,r1
+ lsrs r0,#23     @ clear mantissa if NaN or denormal
+ lsls r0,#23
 2:
- subs r0,r1     @ perform comparison
- beq 4f         @ equal? return 0
- bgt 3f         @ r0>r1? return +1
- rsbs r2,#0     @ r0<r1: return -1
-3:
- mov r0,r2
-4:
- bx r14
-
+ lsls r2,r1,#1
+ lsrs r2,#24
+ beq 1f
+ cmp r2,#0xff
+ bne 2f
+1:
+ lsrs r1,#23     @ clear mantissa if NaN or denormal
+ lsls r1,#23
+2:
 .thumb_func
-mufp_fcmp_flags:
- movs r2, #1
- lsls r2,r2,#31  @ r3=0x80000000
- tst r0,r2       @ check sign of first argument
- beq 1f
- subs r0,r2,r0   @ convert to 2's complement form for direct comparison
+mufp_fcmp_fast_flags:
+.thumb_func
+mufp_fcmp_fast:
+ movs r2,#1      @ initialise result
+ eors r1,r0
+ bmi 4f          @ opposite signs? then can proceed on basis of sign of x
+ eors r1,r0      @ restore y
+ bpl 1f
+ rsbs r2,#0      @ both negative? flip comparison
 1:
- tst r1,r2       @ repeat for second argument
- beq 2f
- subs r1,r2,r1
+ cmp r0,r1
+ bgt 2f
+ blt 3f
+5:
+ movs r2,#0
+3:
+ rsbs r2,#0
 2:
- subs r0,r1     @ perform comparison
+ subs r0,r2,#0
  bx r14
+4:
+ orrs r1,r0
+ adds r1,r1
+ beq 5b
+ cmp r0,#0
+ bge 2b
+ b 3b
 
 @ convert float to signed int, rounding towards -Inf, clamping
 .thumb_func
@@ -258,6 +254,9 @@ mufp_float2int:
 mufp_float2fix:
  push {r4,r14}
  bl unpackx
+ movs r3,r2
+ adds r3,#130
+ bmi 6f          @ -0?
  add r2,r1       @ incorporate binary point position into exponent
  subs r2,#23     @ r2 is now amount of left shift required
  blt 1f          @ requires right shift?
@@ -278,6 +277,9 @@ mufp_float2fix:
  movs r2,#32
 2:
  asrs r0,r0,r2
+ pop {r4,r15}
+6:
+ movs r0,#0
  pop {r4,r15}
 
 @ unsigned version
@@ -300,6 +302,56 @@ mufp_float2ufix:
  lsls r0,r0,r2   @ result fits, left shifted
  pop {r4,r15}
 
+
+@ convert uint64 to float, rounding
+.thumb_func
+mufp_uint642float:
+ movs r2,#0       @ fall through
+
+@ convert unsigned 64-bit fix to float, rounding; number of r0:r1 bits after point in r2
+.thumb_func
+mufp_ufix642float:
+ push {r4,r5,r14}
+ cmp r1,#0
+ bpl 3f          @ positive? we can use signed code
+ lsls r5,r1,#31  @ contribution to sticky bits
+ orrs r5,r0
+ lsrs r0,r1,#1
+ subs r2,#1
+ b 4f
+
+@ convert int64 to float, rounding
+.thumb_func
+mufp_int642float:
+ movs r2,#0       @ fall through
+
+@ convert signed 64-bit fix to float, rounding; number of r0:r1 bits after point in r2
+.thumb_func
+mufp_fix642float:
+ push {r4,r5,r14}
+3:
+ movs r5,r0
+ orrs r5,r1
+ beq ret_pop45   @ zero? return +0
+ asrs r5,r1,#31  @ sign bits
+2:
+ asrs r4,r1,#24  @ try shifting 7 bits at a time
+ cmp r4,r5
+ bne 1f          @ next shift will overflow?
+ lsls r1,#7
+ lsrs r4,r0,#25
+ orrs r1,r4
+ lsls r0,#7
+ adds r2,#7
+ b 2b
+1:
+ movs r5,r0
+ movs r0,r1
+4:
+ rsbs r2,#0
+ adds r2,#32+29
+ b packret
+
 @ convert signed int to float, rounding
 .thumb_func
 mufp_int2float:
@@ -316,6 +368,7 @@ packretns:       @ pack and return, sticky bits=0
  movs r5,#0
 packret:         @ common return point: "pack and return"
  bl packx
+ret_pop45:
  pop {r4,r5,r15}
 
 
@@ -344,14 +397,12 @@ mufp_ufix2float:
 @ r1: y
 @ r2: z/omega
 @ r3: coefficient pointer
-@ r4,r8: m
+@ r4,r12: m
 @ r5: i (shift)
 
 cordic_start: @ initialisation
- mov r7,r8
- push {r7}
  movs r5,#0   @ initial shift=0
- mov r8,r4
+ mov r12,r4
  b 5f
 
 cordic_vstep: @ one step of algorithm in vector mode
@@ -370,12 +421,11 @@ cordic_rstep: @ one step of algorithm in rotation mode
  adds r1,r6   @ positive rotation: y=y+(x>>i)
  subs r2,r4   @ accumulate angle
 2:
- mov r4,r8
+ mov r4,r12
  muls r7,r4   @ apply sign from m
  subs r0,r7   @ finish rotation: x=x{+/-}(y>>i)
 5:
- ldr r4,[r3]  @ fetch next angle from table
- adds r3,#4   @ bump pointer
+ ldmia r3!,{r4} @ fetch next angle from table and bump pointer
  lsrs r4,#1   @ repeated angle?
  bcs 3f
  adds r5,#1   @ adjust shift if not
@@ -399,15 +449,13 @@ cordic_rot:
  asrs r2,#3
  muls r6,r2        @ all remaining CORDIC steps in a multiplication
  muls r7,r2
- mov r4,r8
+ mov r4,r12
  muls r7,r4
  asrs r6,#12
  asrs r7,#12
  subs r0,r7        @ x=x{+/-}(yz>>k)
  adds r1,r6        @ y=y+(xz>>k)
 cordic_exit:
- pop {r7}
- mov r8,r7
  pop {r6,r7,r15}
 
 @ CORDIC vector mode
@@ -583,7 +631,41 @@ mufp_fln:
 .thumb_func
 mufp_fatan2:
  push {r4,r5,r14}
- bl unpackxyalign        @ convert to fixed point (ensure common exponent, which is discarded)
+
+@ unpack arguments and shift one down to have common exponent
+ bl unpackx
+ bl xchxy
+ bl unpackx
+ lsls r0,r0,#5  @ Q28
+ lsls r1,r1,#5  @ Q28
+ adds r4,r2,r3  @ this is -760 if both arguments are 0 and at least -380-126=-506 otherwise
+ asrs r4,#9
+ adds r4,#1
+ bmi 2f         @ force y to 0 proper, so result will be zero
+ subs r4,r2,r3  @ calculate shift
+ bge 1f         @ ex>=ey?
+ rsbs r4,#0     @ make shift positive
+ asrs r0,r4
+ cmp r4,#28
+ blo 3f
+ asrs r0,#31
+ b 3f
+1:
+ asrs r1,r4
+ cmp r4,#28
+ blo 3f
+2:
+@ here |x|>>|y| or both x and y are ±0
+ cmp r0,#0
+ bge 4f         @ x positive, return signed 0
+ ldr r0,pi_q29  @ x negative, return +/- pi
+ asrs r1,#31
+ eors r0,r1
+ b 7f
+4:
+ asrs r0,r1,#31
+ b 7f
+3:
  movs r2,#0              @ initial angle
  cmp r0,#0               @ x negative
  bge 5f
@@ -595,6 +677,8 @@ mufp_fatan2:
  movs r4,#1              @ m=1
  bl cordic_vec           @ also produces magnitude (with scaling factor 1.646760119), which is discarded
  mov r0,r2               @ result here is -pi/2..3pi/2 Q29
+@ asrs r2,#29
+@ subs r0,r2
  ldr r2,pi_q29           @ pi Q29
  adds r4,r0,r2           @ attempt to fix -3pi/2..-pi case
  bcs 6f                  @ -pi/2..0? leave result as is
@@ -603,6 +687,7 @@ mufp_fatan2:
  subs r0,r4,r2           @ >pi: take off 2pi
 6:
  subs r0,#1              @ fiddle factor so atan2(0,1)==0
+7:
  movs r2,#0              @ exponent for pack
  b packretns
 
@@ -802,11 +887,12 @@ fa_ye255:
 .align 2
 .thumb_func
 mufp_fmul:
- push {r4,r5,r6,r7,r14}
- mov r6,r0
- eors r6,r1     @ sign of result
- lsrs r6,#31
- lsls r6,#31
+ push {r7,r14}
+ mov r2,r0
+ eors r2,r1       @ sign of result
+ lsrs r2,#31
+ lsls r2,#31
+ mov r14,r2
  lsls r0,#1
  lsls r1,#1
  lsrs r2,r0,#24 @ xe
@@ -821,69 +907,74 @@ fm_xe:
 fm_ye:
  adds r7,r2,r3  @ exponent of result (will possibly be incremented)
  subs r7,#128   @ adjust bias for packing
- movs r2,#1
- lsls r2,#23
  lsls r0,#8     @ x mantissa
- lsls r1,#8
- lsrs r0,#9     @ y mantissa
+ lsls r1,#8       @ y mantissa
+ lsrs r0,#9
  lsrs r1,#9
- adds r0,r2     @ implied 1s
- adds r1,r2
 
- uxth r3,r0      @ Q23
- lsrs r4,r1,#16  @ Q7
- muls r3,r4      @ L*H, Q30
- lsrs r4,r0,#16  @ Q7
- uxth r5,r1      @ Q23
- muls r4,r5      @ H*L, Q30
- adds r3,r4      @ sum of middle partial products Q30
- uxth r4,r0
- muls r4,r5      @ L*L, Q46
- uxth r5,r4      @ initialise sticky bits from low half of low partial product
- lsrs r4,#16     @ Q30
- adds r3,r4      @ add high half of low partial product to sum of middle partial products Q30
-                 @ (cannot generate carry by limits on input arguments)
- lsrs r0,#16     @ Q7
- lsrs r1,#16     @ Q7
- muls r0,r1      @ H*H, Q14
- lsls r0,#9      @ high partial product Q23
- lsrs r1,r3,#7   @ middle partial products Q23
- adds r0,r1      @ result Q23
- lsrs r1,r0,#24
+ adds r2,r0,r1    @ for later
+ mov r12,r2
+ lsrs r2,r0,#7    @ x[22..7] Q16
+ lsrs r3,r1,#7    @ y[22..7] Q16
+ muls r2,r2,r3    @ result [45..14] Q32: never an overestimate and worst case error is 2*(2^7-1)*(2^23-2^7)+(2^7-1)^2 = 2130690049 < 2^31
+ muls r0,r0,r1    @ result [31..0] Q46
+ lsrs r2,#18      @ result [45..32] Q14
+ bcc 1f
+ cmp r0,#0
+ bmi 1f
+ adds r2,#1       @ fix error in r2
+1:
+ lsls r3,r0,#9    @ bits off bottom of result
+ lsrs r0,#23      @ Q23
+ lsls r2,#9
+ adds r0,r2       @ cut'n'shut
+ add r0,r12       @ implied 1*(x+y) to compensate for no insertion of implied 1s
+@ result-1 in r3:r0 Q23+32, i.e., in range [0,3)
+
+ lsrs r1,r0,#23
  bne fm_0        @ branch if we need to shift down one place
 @ here 1<=result<2
  cmp r7,#254
  bhs fm_3a       @ catches both underflow and overflow
- lsls r3,#26     @ sticky bits at top of R3, rounding bit in carry
+ lsls r3,#1       @ sticky bits at top of R3, rounding bit in carry
  bcc fm_1        @ no rounding
- adds r0,#1      @ assume we will round up
- orrs r5,r3      @ union of sticky bits
  beq fm_2        @ rounding tie?
+ adds r0,#1       @ round up
 fm_1:
+ adds r7,#1       @ for implied 1
  lsls r7,#23     @ pack result
  add r0,r7
- add r0,r6
- pop {r4,r5,r6,r7,r15}
+ add r0,r14
+ pop {r7,r15}
 fm_2:            @ rounding tie
+ adds r0,#1
+fm_3:
  lsrs r0,#1
  lsls r0,#1      @ clear bottom bit
  b fm_1
 
-@ here 2<=result<4
+@ here 1<=result-1<3
 fm_0:
  adds r7,#1      @ increment exponent
  cmp r7,#254
  bhs fm_3b       @ catches both underflow and overflow
  lsrs r0,#1      @ shift mantissa down
- bcc fm_1        @ no rounding
+ bcc fm_1a        @ no rounding
  adds r0,#1      @ assume we will round up
- lsls r3,#25     @ sticky bits
- orrs r5,r3
- beq fm_2        @ rounding tie?
- lsls r7,#23     @ pack result
+ cmp r3,#0        @ sticky bits
+ beq fm_3c        @ rounding tie?
+fm_1a:
+ adds r7,r7
+ adds r7,#1       @ for implied 1
+ lsls r7,#22      @ pack result
  add r0,r7
- add r0,r6
- pop {r4,r5,r6,r7,r15}
+ add r0,r14
+ pop {r7,r15}
+
+fm_3c:
+ lsrs r0,#1
+ lsls r0,#1       @ clear bottom bit
+ b fm_1a
 
 fm_xe0:
  subs r2,#16
@@ -900,31 +991,38 @@ fm_ye255:
 fm_3b:
  bge fm_4        @ branch on overflow
 @ trap case where result is denormal 0x007fffff + 0.5ulp or more
- lsrs r0,#1
+ adds r7,#1      @ exponent=-1?
+ bne fm_5
+@ corrected mantissa will be >= 3.FFFFFC (0x1fffffe Q23)
+@ so r0 >= 2.FFFFFC (0x17ffffe Q23)
+ adds r0,#2
+ lsrs r0,#23
+ cmp r0,#3
+ bne fm_5
  b fm_6
 
 fm_3a:
  bge fm_4        @ branch on overflow
 @ trap case where result is denormal 0x007fffff + 0.5ulp or more
-fm_6:
  adds r7,#1      @ exponent=-1?
  bne fm_5
- adds r0,#1      @ mantissa=0xffffff?
- lsrs r0,#24
+ adds r0,#1      @ mantissa=0xffffff (i.e., r0=0x7fffff)?
+ lsrs r0,#23
  beq fm_5
+fm_6:
  movs r0,#1      @ return smallest normal
  lsls r0,#23
- orrs r0,r6
- pop {r4,r5,r6,r7,r15}
+ add r0,r14
+ pop {r7,r15}
 
 fm_5:
- movs r0,r6
- pop {r4,r5,r6,r7,r15}
+ mov r0,r14
+ pop {r7,r15}
 fm_4:
  movs r0,#0xff
  lsls r0,#23
- orrs r0,r6
- pop {r4,r5,r6,r7,r15}
+ add r0,r14
+ pop {r7,r15}
 
 @ This version of the division algorithm uses external divider hardware to estimate the
 @ reciprocal of the divisor to about 14 bits; then a multiplication step to get a first
@@ -984,7 +1082,7 @@ fdiv_n:
  lsls r6,#31       @ sign of result in bit 31, other bits clear
 
 .if use_hw_div
-@ the above code takes long enough to guaratee the result is ready
+@ the above code takes long enough to guarantee the result is ready
  ldr r5,[r5,#DIV_QUOTIENT]
 .endif
 
@@ -1092,17 +1190,8 @@ retinf:
  bne retzero      @ exponent <-1? return 0
 @ here exponent is exactly -1
  lsrs r1,r4,#25
- bcs 11f          @ mantissa is 01000000?
- adds r1,r4,#1
- lsrs r1,#25
- bcc retzero
-@ here mantissa of result is 00ffffff
-@ bl dump
- lsls r1,r2,#9
- bne retzero      @ and was it a division by a power of 2?
-
+ bcc retzero      @ mantissa is not 01000000?
 @ return minimum normal
-11:
  movs r0,#1
  lsls r0,#23
  orrs r0,r6
@@ -1192,54 +1281,28 @@ mufp_fsqrt:
 sq_3:
  lsls r2,#23      @ pack exponent
  adds r0,r2,r3
+sq_6:
  pop {r4}
  bx r14
 
 sq_0:
- beq sq_4       @ -0: return it
-@ here negative and not -0: return an infinity
-sq_1:
- movs r0,#0xff
+ lsrs r1,#24
+ beq sq_2         @ -0: return it
+@ here negative and not -0: return -Inf
+ asrs r0,#31
+sq_5:
  lsls r0,#23
- pop {r4}
- bx r14
+ b sq_6
+sq_1:             @ +Inf
+ lsrs r0,#23
+ b sq_5
 sq_2:
- movs r0,#0
-sq_4:
- pop {r4}
- bx r14
+ lsrs r0,#31
+ lsls r0,#31
+ b sq_6
 
 @ round(sqrt(2^22./[72:16:248]))
 rsqrtapp:
 .byte 0xf1,0xda,0xc9,0xbb, 0xb0,0xa6,0x9e,0x97, 0x91,0x8b,0x86,0x82
 
 mufp_lib_end:
-
-// dump:
-//  push {r0-r7,r14}
-//  ldr r0,[r13,#0]
-//  bl o8hex
-//  bl osp
-//  ldr r0,[r13,#4]
-//  bl o8hex
-//  bl osp
-//  ldr r0,[r13,#8]
-//  bl o8hex
-//  bl osp
-//  ldr r0,[r13,#12]
-//  bl o8hex
-//  bl osp
-//  bl osp
-//  ldr r0,[r13,#16]
-//  bl o8hex
-//  bl osp
-//  ldr r0,[r13,#20]
-//  bl o8hex
-//  bl osp
-//  ldr r0,[r13,#24]
-//  bl o8hex
-//  bl osp
-//  ldr r0,[r13,#28]
-//  bl o8hex
-//  bl onl
-//  pop {r0-r7,r15}

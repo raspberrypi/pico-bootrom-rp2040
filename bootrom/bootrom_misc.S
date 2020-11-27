@@ -7,8 +7,6 @@
 .cpu cortex-m0
 .thumb
 
-// Stolen from Graham
-
 .section .text.crc, "ax"
 
 // Each byte digested MSB-first

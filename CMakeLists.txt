@@ -6,7 +6,12 @@ include(pico_sdk/pico_sdk_init.cmake)
 
 project(pico_bootrom)
 
-set(PICO_BARE_METAL 1)
+if (NOT INCLUDE_TESTS)
+    set(PICO_BARE_METAL 1)
+else()
+    # SDK versions conflict with code to be tested
+    set(SKIP_PICO_BIT_OPS 1)
+endif()
 
 # Add pico targets to the build
 pico_sdk_init()
@@ -32,6 +37,7 @@ set(GENERATED_H ${CMAKE_CURRENT_BINARY_DIR}/generated.h)
 # order matches original makefile
 add_executable(bootrom
         bootrom/bootrom_rt0.S
+        bootrom/bit_functions.S
         bootrom/bootrom_main.c
         bootrom/bootrom_misc.S
         bootrom/program_flash_generic.c
@@ -39,6 +45,7 @@ add_executable(bootrom
         bootrom/virtual_disk.c
         bootrom/async_task.c
         bootrom/mufplib.S
+        bootrom/mufplib-double.S
         usb_device_tiny/runtime.c
         usb_device_tiny/usb_device.c
         usb_device_tiny/usb_msc.c
@@ -104,13 +111,23 @@ target_compile_definitions(bootrom PRIVATE
         BOOTROM_ONLY_SIZE_HACKS
         USE_16BIT_ROM_FUNCS
         USE_BOOTROM_GPIO
+
+        # for
         USE_HW_DIV
-        )
+
+        USE_POPCOUNT32
+        USE_CLZ32
+        USE_CTZ32
+        USE_REVERSE32
+)
 
 target_link_options(bootrom PRIVATE "LINKER:--script=${CMAKE_CURRENT_LIST_DIR}/bootrom/bootrom.ld")
 set_target_properties(bootrom PROPERTIES LINK_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/bootrom/bootrom.ld)
 target_link_libraries(bootrom PRIVATE
         hardware_resets
+        hardware_regs
+        hardware_structs
+        pico_platform
         hardware_sync
         boot_uf2_headers
         boot_picoboot_headers
@@ -127,5 +144,9 @@ pico_add_dis_output(bootrom)
 pico_add_map_output(bootrom)
 pico_add_hex_output(bootrom)
 pico_add_h32_output(bootrom)
+
+if (INCLUDE_TESTS)
+    add_subdirectory(test)
+endif()
 
 

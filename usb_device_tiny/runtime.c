@@ -5,8 +5,6 @@
  */
 
 #include "hardware/regs/m0plus.h"
-#include "hardware/regs/sysinfo.h"
-#include "hardware/regs/tbman.h"
 #include "hardware/structs/clocks.h"
 #include "hardware/structs/psm.h"
 #include "hardware/structs/sio.h"
@@ -30,7 +28,7 @@ asm (
 ".hword _dead + 1\n" // should not be called
 ".hword impl_usb_transfer_current_packet_only + 1\n"
 #ifdef USE_PICOBOOT
-".hword impl_rpiboot_cmd_packet + 1\n"
+".hword impl_picoboot_cmd_packet + 1\n"
 #else
 ".hword _dead + 1\n" // should not be called
 #endif
@@ -38,20 +36,14 @@ asm (
 ".hword impl_usb_stream_packet_packet_handler + 1\n"
 ".hword impl_msc_on_sector_stream_chunk + 1\n"
 #ifdef USE_PICOBOOT
-".hword impl_rpiboot_on_stream_chunk + 1\n"
+".hword impl_picoboot_on_stream_chunk + 1\n"
 #endif
 );
 #endif
 
-void *_memcpy(void *dest, const void *src, uint n) {
-    for (uint i = 0; i < n; i++) {
-        ((uint8_t *) dest)[i] = ((const uint8_t *) src)[i];
-    }
-    return dest;
-}
-
 void memset0(void *dest, uint n) {
-    while (n) ((uint8_t *) dest)[--n] = 0;
+    extern void __memset(void *dest, int c, uint n);
+    __memset(dest, 0, n);
 }
 
 volatile bool rebooting;

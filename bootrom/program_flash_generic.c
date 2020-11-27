@@ -228,10 +228,15 @@ void __noinline flash_exit_xip() {
         flash_cs_force(OUTOVER_LOW);
     }
 
-    // Restore IO/pad controls, and send 0xff, 0xff
+    // Restore IO/pad controls, and send 0xff, 0xff. Put pullup on IO2/IO3 as
+    // these may be used as WPn/HOLDn at this point, and we are now starting
+    // to issue serial commands.
 
     qspi_sd_padctrl->sd0 = padctrl_save;
     qspi_sd_padctrl->sd1 = padctrl_save;
+    padctrl_save = (padctrl_save
+        & ~PADS_QSPI_GPIO_QSPI_SD0_PDE_BITS
+    ) | PADS_QSPI_GPIO_QSPI_SD0_PUE_BITS;
     qspi_sd_padctrl->sd2 = padctrl_save;
     qspi_sd_padctrl->sd3 = padctrl_save;
 

@@ -179,7 +179,9 @@ static void _usb_clock_setup() {
     while (!(clocks_hw->clk[clk_sys].selected & 0x2u));
 }
 
-static __noinline __attribute__((noreturn)) void _usb_boot_actual(uint32_t _usb_activity_gpio_pin_mask,
+void __noinline __attribute__((noreturn)) async_task_worker_thunk();
+
+static __noinline __attribute__((noreturn)) void _usb_boot(uint32_t _usb_activity_gpio_pin_mask,
                                                                   uint32_t disable_interface_mask) {
     reset_block(RESETS_RESET_USBCTRL_BITS);
     if (!running_on_fpga())
@@ -206,14 +208,8 @@ static __noinline __attribute__((noreturn)) void _usb_boot_actual(uint32_t _usb_
     usb_boot_device_init(disable_interface_mask);
 
     // worker to run tasks on this thread (never returns); Note: USB code is IRQ driven
-    async_task_worker();
-}
-
-static void __attribute__((noreturn)) _usb_boot(uint32_t _usb_activity_gpio_pin_mask,
-                                                uint32_t _disable_interface_mask) {
-    static uint32_t usb_boot_stack[300]; // this will go in bss
-    __asm volatile ("msr MSP,%0"::"r" (&((uint8_t *) usb_boot_stack)[sizeof(usb_boot_stack)]) : );
-    _usb_boot_actual(_usb_activity_gpio_pin_mask, _disable_interface_mask);
+    // this thunk switches stack into USB DPRAM then calls async_task_worker
+    async_task_worker_thunk();
 }
 
 static void __attribute__((noreturn)) _usb_boot_reboot_wrapper() {
