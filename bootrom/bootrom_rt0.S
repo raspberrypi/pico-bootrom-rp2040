@@ -1,0 +1,583 @@
+/**
+ * Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+
+
+// ----------------------------------------------------------------------------
+// Bootrom Runtime 0
+// ----------------------------------------------------------------------------
+// This is not a full crt0 -- in particular, no .bss or .data initialisation
+// (use of .data/.bss is disallowed via linker script assertions).
+// The bootrom is not permitted to use statically-allocated memory, as parts of
+// it are called into by user code.
+// The purpose of this file is:
+// - Provide initial entry point for both cores
+// - Provide holding pen and launch code for core 1
+// - Provide direct-boot entry for core 0, mainly intended for running
+//   ARM code during ATE
+// - Pass core 0 control over to the main flash boot sequence
+
+#include "hardware/regs/addressmap.h"
+#include "hardware/regs/sio.h"
+#include "hardware/regs/watchdog.h"
+#include "hardware/regs/syscfg.h"
+#include "hardware/regs/clocks.h"
+#include "hardware/regs/vreg_and_chip_reset.h"
+#include "hardware/regs/m0plus.h"
+#include "git_info.h"
+
+// these are available and tested for all input values, though can certainly be omitted for space...
+
+// these numbers are for uniform input (average over uniform distribution of 32 bit input) cycle counts
+// NAME       | TABLE | BUILTIN/NON-TABLE | DESCRIPTION
+// -----------|-------|-------------------|-------------
+// CLZ32      |    15 |                22 | count of leading zeroes
+// CLT32      |    14 |                22 | count of trailing zeroes
+// REVERSE32  |    13 |                20 | bit reverse
+// POPCOUNT32 |    20 |                23 | count of 1 bits
+//
+// Note that 16 bit and 8 bit versions will skew more heavily in favor of the tables...
+
+#define USE_CLZ32
+#define USE_CTZ32
+#define USE_POPCOUNT32
+#define USE_REVERSE32
+
+.cpu cortex-m0
+.thumb
+.section .vectors
+.balign 2
+
+.global __vectors
+__vectors:
+.word _stacktop // MSP
+.word _start    // Reset
+.word _nmi      // NMI
+.word _dead     // HardFault
+
+.global _magic
+_magic:
+# magic
+.byte 'M', 'u'
+# compatibility version (change if function table is incompatible, or functions are backwards incompatible)
+.byte 1
+# ROM version
+.byte 1
+
+.global _well_known
+_well_known:
+.hword function_table
+.hword data_table
+.hword table_lookup + 1
+.hword 0 // pad
+
+.global table_lookup
+.type table_lookup,%function
+.thumb_func
+table_lookup:
+    mov r3, #0
+    ldrh r2, [r0]
+    cmp r2, r3
+    beq 1f
+    ldrh r3, [r0, #2]
+    add r0, #4
+    cmp r1, r2
+    bne table_lookup
+1:
+    mov r0, r3
+    bx lr
+
+.global _dead
+.type _dead,%function
+.thumb_func
+_dead: // in place of irq4 vector
+    wfi
+    b _dead
+
+// this is all a bit cheeky, but the existing code assumed that the table above could go there because nothing ever called
+// some code in irq0 -4 slots
+
+// If you reach this, something has gone wrong. Most likely, the debugger
+// has done a core-only reset while the NMI mask was set, and a relevant
+// IRQ was asserted. This is probably not intentional, and is confusing
+// to debug, so we should just clear the NMI masks.
+.align 2
+.global _nmi
+.type _nmi,%function
+.thumb_func
+_nmi:
+    // we do not want to use any stack as we're called from the core 0 boot path.
+    // we use r12 as this is saved/restored by the processor in an actual NMI
+    mov r12, lr
+    // We can take an NMI straight out of reset, so we should first ensure
+    // that SYSCFG is being clocked, else we end up straight back in NMI
+    bl enable_clocks
+    // Then just clear the NMI mask (for both cores)
+    ldr r0, =(SYSCFG_BASE + SYSCFG_PROC0_NMI_MASK_OFFSET)
+    mov r1, #0
+    str r1, [r0]
+    str r1, [r0, #4]
+    mov pc, r12
+
+// On a cold boot, the clocks will already be enabled, because the power-on state
+// machine will have reset the clock controls. However we can have trouble on a warm
+// boot, that is to say:
+// - The debugger has just reset the processors and started them running
+// - The watchdog has fired, with WDSEL selecting a restart point after
+//   clocks_bank_default.
+// Assume that enough clocks are already enabled to run this code!
+// Note it is NOT recommended to disable things like ROM clock if WDSEL is
+// later than CLOCKS_BANK_DEFAULT.
+.global enable_clocks
+.type enable_clocks,%function
+.thumb_func
+enable_clocks:
+    ldr r0, =(CLOCKS_BASE + CLOCKS_WAKE_EN0_OFFSET)
+    // Set entire clock enable mask. Relying on HCGs to avoid huge current transient
+    mov r1, #0
+    mvn r1, r1
+    str r1, [r0]
+    str r1, [r0, #4]
+    // we steal the return for its own function
+.global _noop
+.type _noop,%function
+.thumb_func
+_noop:
+    bx lr
+
+.align 2
+.global software_git_revision
+software_git_revision:
+.word GIT_REV
+
+.global __irq5_vector
+__irq5_vector:
+.word isr_irq5
+
+copyright:
+.string "(C) 2020 Raspberry Pi Trading Ltd"
+
+
+function_table:
+# function table
+#ifdef USE_POPCOUNT32
+.byte 'P, '3'
+.hword popcount32 + 1
+#endif
+#ifdef USE_REVERSE32
+.byte 'R', '3'
+.hword reverse32 + 1
+#endif
+#ifdef USE_CLZ32
+.byte 'L', '3'
+.hword clz32 + 1
+#endif
+#ifdef USE_CTZ32
+.byte 'T', '3'
+.hword ctz32 + 1
+#endif
+.byte 'M', 'S'
+.hword __memset + 1
+.byte 'S', '4'
+.hword __memset_4 + 1
+.byte 'M', 'C'
+.hword __memcpy + 1
+.byte 'C', '4'
+.hword __memcpy_44 + 1
+.byte 'U', 'B'
+.hword reset_usb_boot + 1
+.byte 'D', 'T'
+.hword debug_trampoline + 1
+.byte 'D', 'E'
+.hword debug_trampoline_end + 1
+.byte 'W', 'V'
+.hword wait_for_vector + 1
+.byte 'I', 'F'
+.hword connect_internal_flash + 1
+.byte 'E', 'X'
+.hword flash_exit_xip + 1
+.byte 'R', 'E'
+.hword flash_range_erase + 1
+.byte 'R', 'P'
+.hword flash_range_program + 1
+.byte 'F', 'C'
+.hword flash_flush_cache + 1
+.byte 'C', 'X'
+.hword flash_enter_cmd_xip + 1
+.byte 'E', 'C'
+.hword enable_clocks + 1
+# end of function table marker
+.hword 0
+
+.global data_table
+data_table:
+    .byte 'G', 'R'
+    .hword software_git_revision
+    .byte 'C', 'R'
+    .hword copyright
+    .byte 'P', '8'
+    .hword popcount8_table
+    .byte 'R', '8'
+    .hword reverse8_table
+    .byte 'L', '8'
+    .hword clz8_table
+    .byte 'T', '8'
+    .hword ctz8_table
+    .byte 'S', 'F'
+    .hword soft_float_table
+    // expose library start and end to facilitate users copying into RAM
+    .byte 'F, 'S'
+    .hword mufp_lib_start
+    .byte 'F, 'E'
+    .hword mufp_lib_end
+    .hword 0
+
+// ----------------------------------------------------------------------------
+// Entry point for both cores
+// ----------------------------------------------------------------------------
+
+.global _start
+.type _start,%function
+.thumb_func
+_start:
+
+// Check if this is core 0, and go to holding pen if not
+check_core:
+    // NOTE: We DO NOT use any stack prior to possible watchdog entry (this includes NMI vector handler)
+    ldr r0, =SIO_BASE
+    ldr r1, [r0, #SIO_CPUID_OFFSET]
+    cmp r1, #0
+    bne wait_for_vector
+
+// Make sure all the control registers we are about to access are being clocked.
+// On a cold boot everything will be set up by the power-on state machine,
+// but the clock setup may be dirty on a warm boot.
+
+// note that the NMI handler does exactly what we want (enable_clocks) and also disables NMI
+    bl _nmi
+
+// If the rescue flag is set in PoR block, we should halt immediately.
+// (presumably some lethal code is in flash which would stop the debugger from
+// communicating with the processors).
+check_rescue:
+    ldr r1, =(VREG_AND_CHIP_RESET_BASE + VREG_AND_CHIP_RESET_CHIP_RESET_OFFSET)
+    ldr r3, =(VREG_AND_CHIP_RESET_CHIP_RESET_PSM_RESTART_FLAG_BITS)
+    ldr r2, [r1]
+    tst r2, r3
+    beq 1f
+// Acknowledge and halt
+    str r3, [r1]
+    b _dead
+1:
+
+// Check watchdog scratch for direct-boot magic numbers
+// This is useful in factory test for running ARM code without accessing DAP.
+// Probably also useful for imaginative software engineers
+// - Scratch 4:  0xb007c0d3
+// - Scratch 5:  Entry point ^ -0xb007c0d3
+// - Scratch 6:  Stack pointer
+// - Scratch 7:  Entry point
+check_wdog:
+    ldr r7, =(WATCHDOG_BASE + WATCHDOG_SCRATCH4_OFFSET)
+    ldr r6, =(0xb007c0d3)
+    ldmia r7!, {r0, r1, r2, r3}
+    cmp r0, r6
+    bne 1f
+    eor r1, r3
+    add r0, r1
+    bne 1f
+    // Clear magic number for next time (note -16 because of r7! above)
+    sub r7, #16
+    str r0, [r7]
+    // Magic numbers look good, so jump straight into the code that has been prepared for us
+    msr msp, r2
+    // Note if this return, we continue with regular boot below
+    blx r3
+    // Proceed to main flash boot sequence
+1:
+    // main does not return
+    bl main
+    // b _dead
+
+// ----------------------------------------------------------------------------
+// Hold/launch code for Core 1
+// ----------------------------------------------------------------------------
+// Core 0 will bring core 1 up once it has gone through the sequence of setting
+// up flash etc.
+//
+
+send_and_then_again:
+    // in case of multiple core 1 resets, we can keep pushing and fill the FIFO
+    // we should wait for an event if the FIFO is full to avoid busy wait
+    wfe
+// takes r0 = word to send, r4 = SIOB_BASE, r5 link register
+send_and_then:
+    ldr r1, [r4, #SIO_FIFO_ST_OFFSET]
+    lsr r1, #SIO_FIFO_ST_RDY_LSB + 1
+    bcc send_and_then_again
+    str r0, [r4, #SIO_FIFO_WR_OFFSET]
+    sev
+    add r6, r5, #1
+    bx  r6
+
+#define M0_BASE (PPB_BASE + M0PLUS_CPUID_OFFSET)
+
+wait_for_vector:
+    ldr r4, =SIO_BASE
+    ldr r7, =M0_BASE
+    // Enable SCR.SLEEPDEEP before WFE -- this allows NVIC to be fully gated during sleep
+    mov r1, #M0PLUS_SCR_SLEEPDEEP_BITS
+    str r1, [r7, #(M0PLUS_SCR_OFFSET - M0PLUS_CPUID_OFFSET)]
+    // note core_0_handshake_loop is the intended next instruction, but the read is harmless
+    // as we're about to drain, so don't waste an instruction branching
+1:
+    ldr r1, [r4, #SIO_FIFO_RD_OFFSET]
+core_0_handshake_loop:
+    // drain the FIFO before sending 0
+    ldr r1, [r4, #SIO_FIFO_ST_OFFSET]
+    lsr r1, #SIO_FIFO_ST_VLD_LSB + 1
+    bcs 1b
+
+    // ...and_then = receive_and_check_zero (which jmps to core_0_handshake_loop on 0)
+    adr r5, receive_and_check_zero
+    // send 0
+    mov r0, #0
+    bl send_and_then
+    // check for cmd 1
+    cmp r0, #1
+    bne core_0_handshake_loop
+    // ack and receive VTOR
+    bl send_and_then
+    str r0, [r7, #(M0PLUS_VTOR_OFFSET - M0PLUS_CPUID_OFFSET)]
+    // ack and receive SP
+    bl send_and_then
+    // initialize
+    msr msp, r0
+    bl send_and_then
+    adr r5, core1_launch
+    // receive IP (0 sends us back into handshake loop)
+    bl send_and_then
+    nop ;// .. for alignment
+core1_launch:
+    // Disable SLEEPDEEP before exiting, as it affects wake latency
+    mov r1, #0
+    str r1, [r7, #(M0PLUS_SCR_OFFSET - M0PLUS_CPUID_OFFSET)]
+    blx r0
+
+// Low power hang on return. Reset the core if you want to provide another entry point
+// (There is no need to return though)
+//
+// alternatively you could return directly to wait_for_vector (available in the function table)
+// if you know core 1 is still in a good state
+    b _dead
+
+.align 2
+// takes r4 = SIOB_BASE
+// returns r0 = word received
+receive_and_check_zero:
+    wfe
+    ldr r0, [r4, #SIO_FIFO_ST_OFFSET]
+    lsr r0, #SIO_FIFO_ST_VLD_LSB + 1
+    bcc receive_and_check_zero
+
+    ldr r0, [r4, #SIO_FIFO_RD_OFFSET]
+    cmp r0, #0
+    // if we received 0, we reset back to main loop
+    beq core_0_handshake_loop
+    bx  lr
+
+// ----------------------------------------------------------------------------
+// Simple debugger trampoline for break-on-return
+// ----------------------------------------------------------------------------
+// This is handy for the debugger calling ROM routines without setting hardware
+// breakpoints, mainly useful for flash programming.
+// Set function address in r7, pass args through r0...r3 as per ABI,
+// then jump to this trampoline.
+
+.global debug_trampoline
+.type debug_trampoline,%function
+.thumb_func
+debug_trampoline:
+    // Ensure the LSB is set (Thumb Mode) to avoid hardfault
+    mov r6, #1
+    orr r7, r7, r6
+    blx r7
+debug_trampoline_end:
+    bkpt #0
+    b debug_trampoline
+
+#ifdef USE_POPCOUNT32
+.align 2
+.global popcount32
+.type popcount32,%function
+.thumb_func
+popcount32:
+    adr r1, popcount8_table
+    uxtb r2, r0
+    ldrb r3, [r1, r2]
+    lsr r0, r0, #8
+    uxtb r2, r0
+    ldrb r2, [r1, r2]
+    add r3, r2
+    lsr r0, r0, #8
+    uxtb r2, r0
+    ldrb r2, [r1, r2]
+    add r3, r2
+    lsr r0, r0, #8
+    ldrb r0, [r1, r0]
+    add r0, r3
+    bx lr
+#endif
+
+#ifdef USE_REVERSE32
+.align 2
+.global reverse32
+.type reverse32,%function
+.thumb_func
+reverse32:
+    adr r3, reverse8_table
+    uxtb r1, r0
+    lsr r0, #8
+    ldrb r2, [r3, r1]
+    uxtb r1, r0
+    rev16 r2, r2
+    ldrb r1, [r3, r1]
+    orr r2, r1
+    lsr r0, #8
+    uxtb r1, r0
+    ldrb r1, [r3, r1]
+    rev r2, r2
+    orr r2, r1
+    lsr r1, r0, #8
+    ldrb r0, [r3, r1]
+    rev16 r2, r2
+    orr r0, r2
+    bx lr
+#endif
+
+#ifdef USE_CLZ32
+.global clz32
+.type clz32,%function
+.thumb_func
+clz32:
+    adr r3, clz8_table
+    mov r2, #24
+    lsr r1, r0, #16
+    beq 1f
+    sub r2, #16
+    mov r0, r1
+1:
+    lsr r1, r0, #8
+    beq 1f
+    sub r2, #8
+    mov r0, r1
+1:
+    ldrb r0, [r3, r0]
+    add r0, r2
+    bx lr
+#endif
+
+#ifdef USE_CTZ32
+.global ctz32
+.type ctz32,%function
+.thumb_func
+.global clz32
+.type clz32,%function
+.thumb_func
+ctz32:
+    adr r3, ctz8_table
+    mov r2, #0
+    lsl r1, r0, #16
+    bne 1f
+    add r2, #16
+    lsr r0, r0, #16
+1:
+    lsl r1, r0, #24
+    bne 1f
+    add r2, #8
+    rev16 r0, r0
+1:
+    uxtb r0, r0
+    ldrb r0, [r3, r0]
+    add r0, r2
+    bx lr
+#endif
+
+rt0_literals:
+.ltorg
+
+//.section .rodata.keep
+
+#ifdef USE_POPCOUNT32
+popcount8_table:
+  .byte 0x00, 0x01, 0x01, 0x02, 0x01, 0x02, 0x02, 0x03, 0x01, 0x02, 0x02, 0x03, 0x02, 0x03, 0x03, 0x04, 0x01, 0x02, 0x02, 0x03, 0x02, 0x03, 0x03, 0x04, 0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05
+  .byte 0x01, 0x02, 0x02, 0x03, 0x02, 0x03, 0x03, 0x04, 0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05, 0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05, 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06
+  .byte 0x01, 0x02, 0x02, 0x03, 0x02, 0x03, 0x03, 0x04, 0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05, 0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05, 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06
+  .byte 0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05, 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06, 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06, 0x04, 0x05, 0x05, 0x06, 0x05, 0x06, 0x06, 0x07
+  .byte 0x01, 0x02, 0x02, 0x03, 0x02, 0x03, 0x03, 0x04, 0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05, 0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05, 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06
+  .byte 0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05, 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06, 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06, 0x04, 0x05, 0x05, 0x06, 0x05, 0x06, 0x06, 0x07
+  .byte 0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05, 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06, 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06, 0x04, 0x05, 0x05, 0x06, 0x05, 0x06, 0x06, 0x07
+  .byte 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06, 0x04, 0x05, 0x05, 0x06, 0x05, 0x06, 0x06, 0x07, 0x04, 0x05, 0x05, 0x06, 0x05, 0x06, 0x06, 0x07, 0x05, 0x06, 0x06, 0x07, 0x06, 0x07, 0x07, 0x08
+#endif
+
+#ifdef USE_REVERSE32
+reverse8_table:
+  .byte 0x00, 0x80, 0x40, 0xc0, 0x20, 0xa0, 0x60, 0xe0, 0x10, 0x90, 0x50, 0xd0, 0x30, 0xb0, 0x70, 0xf0, 0x08, 0x88, 0x48, 0xc8, 0x28, 0xa8, 0x68, 0xe8, 0x18, 0x98, 0x58, 0xd8, 0x38, 0xb8, 0x78, 0xf8
+  .byte 0x04, 0x84, 0x44, 0xc4, 0x24, 0xa4, 0x64, 0xe4, 0x14, 0x94, 0x54, 0xd4, 0x34, 0xb4, 0x74, 0xf4, 0x0c, 0x8c, 0x4c, 0xcc, 0x2c, 0xac, 0x6c, 0xec, 0x1c, 0x9c, 0x5c, 0xdc, 0x3c, 0xbc, 0x7c, 0xfc
+  .byte 0x02, 0x82, 0x42, 0xc2, 0x22, 0xa2, 0x62, 0xe2, 0x12, 0x92, 0x52, 0xd2, 0x32, 0xb2, 0x72, 0xf2, 0x0a, 0x8a, 0x4a, 0xca, 0x2a, 0xaa, 0x6a, 0xea, 0x1a, 0x9a, 0x5a, 0xda, 0x3a, 0xba, 0x7a, 0xfa
+  .byte 0x06, 0x86, 0x46, 0xc6, 0x26, 0xa6, 0x66, 0xe6, 0x16, 0x96, 0x56, 0xd6, 0x36, 0xb6, 0x76, 0xf6, 0x0e, 0x8e, 0x4e, 0xce, 0x2e, 0xae, 0x6e, 0xee, 0x1e, 0x9e, 0x5e, 0xde, 0x3e, 0xbe, 0x7e, 0xfe
+  .byte 0x01, 0x81, 0x41, 0xc1, 0x21, 0xa1, 0x61, 0xe1, 0x11, 0x91, 0x51, 0xd1, 0x31, 0xb1, 0x71, 0xf1, 0x09, 0x89, 0x49, 0xc9, 0x29, 0xa9, 0x69, 0xe9, 0x19, 0x99, 0x59, 0xd9, 0x39, 0xb9, 0x79, 0xf9
+  .byte 0x05, 0x85, 0x45, 0xc5, 0x25, 0xa5, 0x65, 0xe5, 0x15, 0x95, 0x55, 0xd5, 0x35, 0xb5, 0x75, 0xf5, 0x0d, 0x8d, 0x4d, 0xcd, 0x2d, 0xad, 0x6d, 0xed, 0x1d, 0x9d, 0x5d, 0xdd, 0x3d, 0xbd, 0x7d, 0xfd
+  .byte 0x03, 0x83, 0x43, 0xc3, 0x23, 0xa3, 0x63, 0xe3, 0x13, 0x93, 0x53, 0xd3, 0x33, 0xb3, 0x73, 0xf3, 0x0b, 0x8b, 0x4b, 0xcb, 0x2b, 0xab, 0x6b, 0xeb, 0x1b, 0x9b, 0x5b, 0xdb, 0x3b, 0xbb, 0x7b, 0xfb
+  .byte 0x07, 0x87, 0x47, 0xc7, 0x27, 0xa7, 0x67, 0xe7, 0x17, 0x97, 0x57, 0xd7, 0x37, 0xb7, 0x77, 0xf7, 0x0f, 0x8f, 0x4f, 0xcf, 0x2f, 0xaf, 0x6f, 0xef, 0x1f, 0x9f, 0x5f, 0xdf, 0x3f, 0xbf, 0x7f, 0xff
+#endif
+
+#ifdef USE_CLZ32
+clz8_table:
+  .byte 0x08, 0x07, 0x06, 0x06, 0x05, 0x05, 0x05, 0x05, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03
+  .byte 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02
+  .byte 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01
+  .byte 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01
+  .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+  .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+  .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+  .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+#endif
+
+#ifdef USE_CTZ32
+ctz8_table:
+  .byte 0x08, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00
+  .byte 0x05, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00
+  .byte 0x06, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00
+  .byte 0x05, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00
+  .byte 0x07, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00
+  .byte 0x05, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00
+  .byte 0x06, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00
+  .byte 0x05, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00
+#endif
+
+soft_float_table:
+    .word mufp_fadd
+    .word mufp_fsub
+    .word mufp_fmul
+    .word mufp_fdiv
+    .word mufp_fcmp
+    .word mufp_fcmp_flags
+    .word mufp_fsqrt
+    .word mufp_float2int
+    .word mufp_float2fix
+    .word mufp_float2uint
+    .word mufp_float2ufix
+    .word mufp_int2float
+    .word mufp_fix2float
+    .word mufp_uint2float
+    .word mufp_ufix2float
+    .word mufp_fcos
+    .word mufp_fsin
+    .word mufp_ftan
+    .word mufp_fatan2
+    .word mufp_fexp
+    .word mufp_fln
+soft_float_table_end:
