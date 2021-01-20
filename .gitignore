@@ -1,0 +1,4 @@
+.idea
+cmake-*
+generated.h
+git_info.h
