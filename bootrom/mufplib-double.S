@@ -2,7 +2,7 @@
  * Copyright (c) 2020 Mark Owen https://www.quinapalus.com .
  *
  * Raspberry Pi (Trading) Ltd (Licensor) hereby grants to you a non-exclusive license to use the software solely on a
- * Raspberry Pi Pico device. No other use is permitted under the terms of this license.
+ * Raspberry Pi RP2040 device. No other use is permitted under the terms of this license.
  *
  * This software is also available from the copyright owner under GPLv2 licence.
  *
