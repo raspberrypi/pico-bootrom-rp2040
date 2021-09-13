@@ -124,8 +124,8 @@ static_assert(sizeof(boot_device_config) == sizeof(struct usb_configuration_desc
 static struct usb_interface msd_interface;
 
 #ifdef USE_PICOBOOT
-static struct usb_endpoint rpiboot_in, rpiboot_out;
-static struct usb_interface rpiboot_interface;
+static struct usb_endpoint picoboot_in, picoboot_out;
+static struct usb_interface picoboot_interface;
 #endif
 
 static const struct usb_device_descriptor boot_device_descriptor = {
@@ -174,60 +174,60 @@ const char *_get_descriptor_string(uint index) {
 
 #ifdef USE_PICOBOOT
 
-__rom_function_static_impl(void, _rpiboot_cmd_packet)(struct usb_endpoint *ep);
+__rom_function_static_impl(void, _picoboot_cmd_packet)(struct usb_endpoint *ep);
 
-static const struct usb_transfer_type _rpiboot_cmd_transfer_type = {
-        .on_packet = __rom_function_ref(_rpiboot_cmd_packet),
+static const struct usb_transfer_type _picoboot_cmd_transfer_type = {
+        .on_packet = __rom_function_ref(_picoboot_cmd_packet),
         .initial_packet_count = 1,
 };
 
-struct picoboot_cmd_status _rpiboot_current_cmd_status;
+struct picoboot_cmd_status _picoboot_current_cmd_status;
 
-static void _rpiboot_reset() {
+static void _picoboot_reset() {
     usb_debug("PICOBOOT RESET\n");
-    usb_soft_reset_endpoint(&rpiboot_out);
-    usb_soft_reset_endpoint(&rpiboot_in);
-    if (_rpiboot_current_cmd_status.bInProgress) {
+    usb_soft_reset_endpoint(&picoboot_out);
+    usb_soft_reset_endpoint(&picoboot_in);
+    if (_picoboot_current_cmd_status.bInProgress) {
         printf("command in progress so aborting flash\n");
         flash_abort();
     }
-    memset0(&_rpiboot_current_cmd_status, sizeof(_rpiboot_current_cmd_status));
+    memset0(&_picoboot_current_cmd_status, sizeof(_picoboot_current_cmd_status));
     // reset queue (note this also clears exclusive access)
     reset_queue(&virtual_disk_queue);
-    reset_queue(&rpiboot_queue);
+    reset_queue(&picoboot_queue);
 }
 
-struct async_task_queue rpiboot_queue;
+struct async_task_queue picoboot_queue;
 
-static void _tf_rpiboot_wait_command(__unused struct usb_endpoint *ep, __unused struct usb_transfer *transfer) {
-    usb_debug("_tf_rpiboot_wait_command\n");
+static void _tf_picoboot_wait_command(__unused struct usb_endpoint *ep, __unused struct usb_transfer *transfer) {
+    usb_debug("_tf_picoboot_wait_command\n");
     // todo check this at the end of an OUT ACK
-    usb_start_default_transfer_if_not_already_running_or_halted(&rpiboot_out);
+    usb_start_default_transfer_if_not_already_running_or_halted(&picoboot_out);
 }
 
-static void _rpiboot_ack() {
+static void _picoboot_ack() {
     static struct usb_transfer _ack_transfer;
-    _rpiboot_current_cmd_status.bInProgress = false;
-    usb_start_empty_transfer((_rpiboot_current_cmd_status.bCmdId & 0x80u) ? &rpiboot_out : &rpiboot_in, &_ack_transfer,
-                             _tf_rpiboot_wait_command);
+    _picoboot_current_cmd_status.bInProgress = false;
+    usb_start_empty_transfer((_picoboot_current_cmd_status.bCmdId & 0x80u) ? &picoboot_out : &picoboot_in, &_ack_transfer,
+                             _tf_picoboot_wait_command);
 }
 
-#define _tf_ack ((usb_transfer_completed_func)_rpiboot_ack)
+#define _tf_ack ((usb_transfer_completed_func)_picoboot_ack)
 
-static bool _rpiboot_setup_request_handler(__unused struct usb_interface *interface, struct usb_setup_packet *setup) {
+static bool _picoboot_setup_request_handler(__unused struct usb_interface *interface, struct usb_setup_packet *setup) {
     setup = __builtin_assume_aligned(setup, 4);
     if (USB_REQ_TYPE_TYPE_VENDOR == (setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK)) {
         if (setup->bmRequestType & USB_DIR_IN) {
-            if (setup->bRequest == PICOBOOT_IF_CMD_STATUS && setup->wLength == sizeof(_rpiboot_current_cmd_status)) {
+            if (setup->bRequest == PICOBOOT_IF_CMD_STATUS && setup->wLength == sizeof(_picoboot_current_cmd_status)) {
                 uint8_t *buffer = usb_get_single_packet_response_buffer(usb_get_control_in_endpoint(),
-                                                                        sizeof(_rpiboot_current_cmd_status));
-                memcpy(buffer, &_rpiboot_current_cmd_status, sizeof(_rpiboot_current_cmd_status));
+                                                                        sizeof(_picoboot_current_cmd_status));
+                memcpy(buffer, &_picoboot_current_cmd_status, sizeof(_picoboot_current_cmd_status));
                 usb_start_single_buffer_control_in_transfer();
                 return true;
             }
         } else {
             if (setup->bRequest == PICOBOOT_IF_RESET) {
-                _rpiboot_reset();
+                _picoboot_reset();
                 usb_start_empty_control_in_transfer_null_completion();
                 return true;
             }
@@ -236,51 +236,51 @@ static bool _rpiboot_setup_request_handler(__unused struct usb_interface *interf
     return false;
 }
 
-static struct rpiboot_stream_transfer {
+static struct picoboot_stream_transfer {
     struct usb_stream_transfer stream;
     struct async_task task;
-} _rpiboot_stream_transfer;
+} _picoboot_stream_transfer;
 
 static void _atc_ack(struct async_task *task) {
-    if (task->rpiboot_user_token == _rpiboot_stream_transfer.task.rpiboot_user_token) {
+    if (task->picoboot_user_token == _picoboot_stream_transfer.task.picoboot_user_token) {
         usb_warn("atc_ack\n");
-        _rpiboot_ack();
+        _picoboot_ack();
     } else {
-        usb_warn("atc for wrong rpiboot token %08x != %08x\n", (uint) task->rpiboot_user_token,
-                 (uint) _rpiboot_stream_transfer.task.rpiboot_user_token);
+        usb_warn("atc for wrong picoboot token %08x != %08x\n", (uint) task->picoboot_user_token,
+                 (uint) _picoboot_stream_transfer.task.picoboot_user_token);
     }
 }
 
 static void _set_cmd_status(uint32_t status) {
-    _rpiboot_current_cmd_status.dStatusCode = status;
+    _picoboot_current_cmd_status.dStatusCode = status;
 }
 
 static void _atc_chunk_task_done(struct async_task *task) {
-    if (task->rpiboot_user_token == _rpiboot_stream_transfer.task.rpiboot_user_token) {
+    if (task->picoboot_user_token == _picoboot_stream_transfer.task.picoboot_user_token) {
         // save away result
         _set_cmd_status(task->result);
         if (task->result) {
-            usb_halt_endpoint(_rpiboot_stream_transfer.stream.ep);
-            _rpiboot_current_cmd_status.bInProgress = false;
+            usb_halt_endpoint(_picoboot_stream_transfer.stream.ep);
+            _picoboot_current_cmd_status.bInProgress = false;
         }
         // we update the position of the original task which will be submitted again in on_stream_chunk
-        _rpiboot_stream_transfer.task.transfer_addr += task->data_length;
-        usb_stream_chunk_done(&_rpiboot_stream_transfer.stream);
+        _picoboot_stream_transfer.task.transfer_addr += task->data_length;
+        usb_stream_chunk_done(&_picoboot_stream_transfer.stream);
     }
 }
 
-__rom_function_static_impl(bool, _rpiboot_on_stream_chunk)(uint32_t chunk_len __comma_removed_for_space(
+__rom_function_static_impl(bool, _picoboot_on_stream_chunk)(uint32_t chunk_len __comma_removed_for_space(
         struct usb_stream_transfer *transfer)) {
-    assert(transfer == &_rpiboot_stream_transfer.stream);
+    assert(transfer == &_picoboot_stream_transfer.stream);
     assert(chunk_len <= FLASH_PAGE_SIZE);
-    _rpiboot_stream_transfer.task.data_length = chunk_len;
-    queue_task(&rpiboot_queue, &_rpiboot_stream_transfer.task, _atc_chunk_task_done);
+    _picoboot_stream_transfer.task.data_length = chunk_len;
+    queue_task(&picoboot_queue, &_picoboot_stream_transfer.task, _atc_chunk_task_done);
     // for subsequent tasks, check the mutation source
-    _rpiboot_stream_transfer.task.check_last_mutation_source = true;
+    _picoboot_stream_transfer.task.check_last_mutation_source = true;
     return true;
 }
 
-static void _rpiboot_cmd_packet_internal(struct usb_endpoint *ep) {
+static void _picoboot_cmd_packet_internal(struct usb_endpoint *ep) {
     struct usb_buffer *buffer = usb_current_out_packet_buffer(ep);
     uint len = buffer->data_len;
 
@@ -288,16 +288,16 @@ static void _rpiboot_cmd_packet_internal(struct usb_endpoint *ep) {
     if (len == sizeof(struct picoboot_cmd) && cmd->dMagic == PICOBOOT_MAGIC) {
         // pre-init even if we don't need it
         static uint32_t real_token;
-        reset_task(&_rpiboot_stream_transfer.task);
-        _rpiboot_stream_transfer.task.token = --real_token; // we go backwards to disambiguate with MSC tasks
-        _rpiboot_stream_transfer.task.rpiboot_user_token = cmd->dToken;
-        _rpiboot_current_cmd_status.bCmdId = cmd->bCmdId;
-        _rpiboot_current_cmd_status.dToken = cmd->dToken;
-        _rpiboot_current_cmd_status.bInProgress = false;
+        reset_task(&_picoboot_stream_transfer.task);
+        _picoboot_stream_transfer.task.token = --real_token; // we go backwards to disambiguate with MSC tasks
+        _picoboot_stream_transfer.task.picoboot_user_token = cmd->dToken;
+        _picoboot_current_cmd_status.bCmdId = cmd->bCmdId;
+        _picoboot_current_cmd_status.dToken = cmd->dToken;
+        _picoboot_current_cmd_status.bInProgress = false;
         _set_cmd_status(PICOBOOT_UNKNOWN_CMD);
-        _rpiboot_stream_transfer.task.transfer_addr = _rpiboot_stream_transfer.task.erase_addr = cmd->range_cmd.dAddr;
-        _rpiboot_stream_transfer.task.erase_size = cmd->range_cmd.dSize;
-        _rpiboot_stream_transfer.task.exclusive_param = cmd->exclusive_cmd.bExclusive;
+        _picoboot_stream_transfer.task.transfer_addr = _picoboot_stream_transfer.task.erase_addr = cmd->range_cmd.dAddr;
+        _picoboot_stream_transfer.task.erase_size = cmd->range_cmd.dSize;
+        _picoboot_stream_transfer.task.exclusive_param = cmd->exclusive_cmd.bExclusive;
         static_assert(
                 offsetof(struct picoboot_cmd, range_cmd.dAddr) == offsetof(struct picoboot_cmd, address_only_cmd.dAddr),
                 ""); // we want transfer_addr == exec_cmd.addr also
@@ -337,33 +337,33 @@ static void _rpiboot_cmd_packet_internal(struct usb_endpoint *ep) {
                 }
                 if (cmd->bCmdId == PC_REBOOT) {
                     safe_reboot(cmd->reboot_cmd.dPC, cmd->reboot_cmd.dSP, cmd->reboot_cmd.dDelayMS);
-                    return _rpiboot_ack();
+                    return _picoboot_ack();
                 }
                 if (type) {
-                    _rpiboot_stream_transfer.task.type = type;
-                    _rpiboot_stream_transfer.task.source = TASK_SOURCE_PICOBOOT;
-                    _rpiboot_current_cmd_status.bInProgress = true;
+                    _picoboot_stream_transfer.task.type = type;
+                    _picoboot_stream_transfer.task.source = TASK_SOURCE_PICOBOOT;
+                    _picoboot_current_cmd_status.bInProgress = true;
                     if (cmd->dTransferLength) {
                         static uint8_t _buffer[FLASH_PAGE_SIZE];
-                        static const struct usb_stream_transfer_funcs _rpiboot_stream_funcs = {
+                        static const struct usb_stream_transfer_funcs _picoboot_stream_funcs = {
                                 .on_packet_complete = usb_stream_noop_on_packet_complete,
-                                .on_chunk = __rom_function_ref(_rpiboot_on_stream_chunk)
+                                .on_chunk = __rom_function_ref(_picoboot_on_stream_chunk)
                         };
 
-                        _rpiboot_stream_transfer.task.data = _buffer;
-                        usb_stream_setup_transfer(&_rpiboot_stream_transfer.stream,
-                                                  &_rpiboot_stream_funcs, _buffer, FLASH_PAGE_SIZE,
+                        _picoboot_stream_transfer.task.data = _buffer;
+                        usb_stream_setup_transfer(&_picoboot_stream_transfer.stream,
+                                                  &_picoboot_stream_funcs, _buffer, FLASH_PAGE_SIZE,
                                                   cmd->dTransferLength,
                                                   _tf_ack);
                         if (type & AT_WRITE) {
-                            _rpiboot_stream_transfer.stream.ep = &rpiboot_out;
-                            return usb_chain_transfer(&rpiboot_out, &_rpiboot_stream_transfer.stream.core);
+                            _picoboot_stream_transfer.stream.ep = &picoboot_out;
+                            return usb_chain_transfer(&picoboot_out, &_picoboot_stream_transfer.stream.core);
                         } else {
-                            _rpiboot_stream_transfer.stream.ep = &rpiboot_in;
-                            return usb_start_transfer(&rpiboot_in, &_rpiboot_stream_transfer.stream.core);
+                            _picoboot_stream_transfer.stream.ep = &picoboot_in;
+                            return usb_start_transfer(&picoboot_in, &_picoboot_stream_transfer.stream.core);
                         }
                     }
-                    return queue_task(&rpiboot_queue, &_rpiboot_stream_transfer.task, _atc_ack);
+                    return queue_task(&picoboot_queue, &_picoboot_stream_transfer.task, _atc_ack);
                 }
                 _set_cmd_status(PICOBOOT_INVALID_TRANSFER_LENGTH);
             } else {
@@ -371,12 +371,12 @@ static void _rpiboot_cmd_packet_internal(struct usb_endpoint *ep) {
             }
         }
     }
-    usb_halt_endpoint(&rpiboot_in);
-    usb_halt_endpoint(&rpiboot_out);
+    usb_halt_endpoint(&picoboot_in);
+    usb_halt_endpoint(&picoboot_out);
 }
 
-__rom_function_static_impl(void, _rpiboot_cmd_packet)(struct usb_endpoint *ep) {
-    _rpiboot_cmd_packet_internal(ep);
+__rom_function_static_impl(void, _picoboot_cmd_packet)(struct usb_endpoint *ep) {
+    _picoboot_cmd_packet_internal(ep);
     usb_packet_done(ep);
 }
 
@@ -390,7 +390,7 @@ static void _usb_boot_on_configure(struct usb_device *device, bool configured) {
 #endif
     msc_on_configure(device, configured);
 #ifdef USE_PICOBOOT
-    if (configured) _rpiboot_reset();
+    if (configured) _picoboot_reset();
 #endif
 }
 
@@ -431,7 +431,7 @@ void usb_boot_device_init(uint32_t _usb_disable_interface_mask) {
     _write_six_msb_hex_chars(serial_number_string + 6, software_git_revision);
 
     const struct boot_device_config *config_desc = &boot_device_config;
-    uint rpiboot_interface_num = 1;
+    uint picoboot_interface_num = 1;
 #ifdef USB_BOOT_WITH_SUBSET_OF_INTERFACES
     // if we are disabling interfaces
     if (usb_disable_interface_mask) {
@@ -441,7 +441,7 @@ void usb_boot_device_init(uint32_t _usb_disable_interface_mask) {
         static_assert(sizeof(_single_interface_config) ==
                       sizeof(struct usb_configuration_descriptor) + sizeof(struct usb_simple_interface_descriptor), "");
         if (usb_disable_interface_mask & 1u) {
-            rpiboot_interface_num = 0;
+            picoboot_interface_num = 0;
             memcpy(&_single_interface_config.interface_desc[0], &boot_device_config.interface_desc[1],
                    sizeof(struct usb_simple_interface_descriptor));
         }
@@ -461,23 +461,23 @@ void usb_boot_device_init(uint32_t _usb_disable_interface_mask) {
     }
 #ifdef USE_PICOBOOT
     if (!(usb_disable_interface_mask & 2u)) {
-        static struct usb_endpoint *const rpiboot_endpoints[] = {
-                &rpiboot_out,
-                &rpiboot_in,
+        static struct usb_endpoint *const picoboot_endpoints[] = {
+                &picoboot_out,
+                &picoboot_in,
         };
-        usb_interface_init(&rpiboot_interface, &config_desc->interface_desc[rpiboot_interface_num].desc,
-                           rpiboot_endpoints, count_of(rpiboot_endpoints), true);
-        static struct usb_transfer _rpiboot_cmd_transfer;
-        _rpiboot_cmd_transfer.type = &_rpiboot_cmd_transfer_type;
-        usb_set_default_transfer(&rpiboot_out, &_rpiboot_cmd_transfer);
-        rpiboot_interface.setup_request_handler = _rpiboot_setup_request_handler;
+        usb_interface_init(&picoboot_interface, &config_desc->interface_desc[picoboot_interface_num].desc,
+                           picoboot_endpoints, count_of(picoboot_endpoints), true);
+        static struct usb_transfer _picoboot_cmd_transfer;
+        _picoboot_cmd_transfer.type = &_picoboot_cmd_transfer_type;
+        usb_set_default_transfer(&picoboot_out, &_picoboot_cmd_transfer);
+        picoboot_interface.setup_request_handler = _picoboot_setup_request_handler;
     }
 #endif
 
     static struct usb_interface *const boot_device_interfaces[] = {
             &msd_interface,
 #ifdef USE_PICOBOOT
-            &rpiboot_interface,
+            &picoboot_interface,
 #endif
     };
     static_assert(count_of(boot_device_interfaces) == BOOT_DEVICE_NUM_INTERFACES, "");

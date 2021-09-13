@@ -296,8 +296,8 @@ void __attribute__((noreturn)) async_task_worker() {
             execute_task(&virtual_disk_queue, &_worker_task);
         }
 #ifdef USE_PICOBOOT
-        else if (dequeue_task(&rpiboot_queue, &_worker_task)) {
-            execute_task(&rpiboot_queue, &_worker_task);
+        else if (dequeue_task(&picoboot_queue, &_worker_task)) {
+            execute_task(&picoboot_queue, &_worker_task);
         }
 #endif
         else {

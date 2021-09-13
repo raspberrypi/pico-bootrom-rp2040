@@ -36,13 +36,13 @@
 
 #define ROM_FUNC_usb_transfer_current_packet_only 1
 #ifdef USE_PICOBOOT
-#define ROM_FUNC_rpiboot_cmd_packet 2
+#define ROM_FUNC_picoboot_cmd_packet 2
 #endif
 #define ROM_FUNC_msc_cmd_packet 3
 #define ROM_FUNC_usb_stream_packet_packet_handler 4
 #define ROM_FUNC_msc_on_sector_stream_chunk 5
 #ifdef USE_PICOBOOT
-#define ROM_FUNC_rpiboot_on_stream_chunk 6
+#define ROM_FUNC_picoboot_on_stream_chunk 6
 #endif
 
 extern uint8_t _rom_functions[];
@@ -56,11 +56,8 @@ typedef unsigned int uint;
 
 #define count_of(a) (sizeof(a)/sizeof((a)[0]))
 
-extern void *_memcpy(void *dest, const void *src, uint n);
 extern void *__memcpy(void *dest, const void *src, uint n);
-// c version
-//#define memcpy _memcpy
-// Rom good version
+// Rom version
 #define memcpy __memcpy
 extern void memset0(void *dest, uint count);
 void interrupt_enable(uint int_num, bool enable);
