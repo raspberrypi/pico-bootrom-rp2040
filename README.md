@@ -1,4 +1,4 @@
-This is the B1 version of the RP2040 bootrom.
+This is the B2 version of the RP2040 bootrom.
 
 The version on the chip was built in _Debug_ mode using GCC 9.3.1 (GNU Arm Embedded Toolchain 9-2020-q2-update).
 

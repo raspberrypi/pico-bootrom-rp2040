@@ -20,6 +20,8 @@
 // - Pass core 0 control over to the main flash boot sequence
 
 #include "hardware/regs/addressmap.h"
+#include "hardware/regs/pads_bank0.h"
+#include "hardware/regs/resets.h"
 #include "hardware/regs/sio.h"
 #include "hardware/regs/watchdog.h"
 #include "hardware/regs/syscfg.h"
@@ -47,7 +49,7 @@ _magic:
 # compatibility version (change if function table is incompatible, or functions are backwards incompatible)
 .byte 1
 # ROM version
-.byte 2
+.byte 3
 
 .global _well_known
 _well_known:
@@ -189,8 +191,6 @@ function_table:
 .hword flash_flush_cache + 1
 .byte 'C', 'X'
 .hword flash_enter_cmd_xip + 1
-.byte 'E', 'C'
-.hword enable_clocks + 1
 # end of function table marker
 .hword 0
 
@@ -247,14 +247,32 @@ check_core:
 // communicating with the processors).
 check_rescue:
     ldr r1, =(VREG_AND_CHIP_RESET_BASE + VREG_AND_CHIP_RESET_CHIP_RESET_OFFSET)
-    ldr r3, =(VREG_AND_CHIP_RESET_CHIP_RESET_PSM_RESTART_FLAG_BITS)
     ldr r2, [r1]
-    tst r2, r3
-    beq 1f
-// Acknowledge and halt
-    str r3, [r1]
+#if VREG_AND_CHIP_RESET_CHIP_RESET_PSM_RESTART_FLAG_BITS != 0x01000000
+#error
+#endif
+    lsr r3, r2, #25
+    bcc 1f
+// Acknowledge and halt (note we write all bits, but VREG_AND_CHIP_RESET_CHIP_RESET_PSM_RESTART_FLAG_BITS
+// is the only WC bit
+    str r2, [r1]
     b _dead
 1:
+
+disable_adc_ie:
+#if RESETS_RESET_PADS_BANK0_BITS != (0x80 << 1)
+#error
+#endif
+    mov r0, #0x80
+    lsl r0, #1
+    bl unreset_block_wait_noinline
+
+    ldr r1, =PADS_BANK0_BASE + REG_ALIAS_CLR_BITS
+    mov r2, #PADS_BANK0_GPIO0_IE_BITS
+    str r2, [r1, #PADS_BANK0_GPIO26_OFFSET]
+    str r2, [r1, #PADS_BANK0_GPIO27_OFFSET]
+    str r2, [r1, #PADS_BANK0_GPIO28_OFFSET]
+    str r2, [r1, #PADS_BANK0_GPIO29_OFFSET]
 
 // Check watchdog scratch for direct-boot magic numbers
 // This is useful in factory test for running ARM code without accessing DAP.
@@ -343,7 +361,7 @@ core_0_handshake_loop:
     adr r5, core1_launch
     // receive IP (0 sends us back into handshake loop)
     bl send_and_then
-    nop ;// .. for alignment
+//    nop // .. for alignment
 core1_launch:
     // Disable SLEEPDEEP before exiting, as it affects wake latency
     mov r1, #0
@@ -371,6 +389,35 @@ receive_and_check_zero:
     // if we received 0, we reset back to main loop
     beq core_0_handshake_loop
     bx  lr
+
+.global reset_block_noinline
+.type reset_block_noinline,%function
+.thumb_func
+reset_block_noinline:
+    ldr r1, =RESETS_BASE + REG_ALIAS_SET_BITS
+    str r0, [r1]
+    bx lr
+
+.global reset_unreset_block_wait_noinline
+.type reset_unreset_block_wait_noinline,%function
+.thumb_func
+reset_unreset_block_wait_noinline:
+    ldr r1, =RESETS_BASE + REG_ALIAS_SET_BITS
+    str r0, [r1]
+    // fall thru
+
+.global unreset_block_wait_noinline
+.type unreset_block_wait_noinline,%function
+.thumb_func
+unreset_block_wait_noinline:
+    ldr r1, =RESETS_BASE
+    ldr r2, =RESETS_BASE + REG_ALIAS_CLR_BITS
+    str r0, [r2]
+1:
+    ldr r2, [r1, #RESETS_RESET_DONE_OFFSET]
+    bic r0, r2
+    bne 1b
+    bx lr
 
 // ----------------------------------------------------------------------------
 // Simple debugger trampoline for break-on-return
@@ -419,7 +466,7 @@ soft_float_table:
     .word mufp_fcos
     .word mufp_fsin
     .word mufp_ftan
-    .word _dead // todo use this for storage?
+    .word mufp_fsincos
     .word mufp_fexp
     .word mufp_fln
 
@@ -455,7 +502,7 @@ soft_double_table:
     .word mufp_dcos
     .word mufp_dsin
     .word mufp_dtan
-    .word _dead
+    .word mufp_dsincos
     .word mufp_dexp
     .word mufp_dln
 
@@ -485,6 +532,9 @@ async_task_worker_thunk:
     ldr r0, =usb_boot_stack_end
     msr MSP, r0
     bl async_task_worker
+    // async_task_worker does not return
+
+_:
 
 .section .bss
 .align 2

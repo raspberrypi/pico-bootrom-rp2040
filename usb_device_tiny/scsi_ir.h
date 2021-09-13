@@ -32,7 +32,7 @@ static const struct scsi_inquiry_response scsi_ir = {
         .additional_length = sizeof(struct scsi_inquiry_response) - 4,
         .vendor  = "RPI     ",
         .product = "RP2             ",
-        .version = "2   ",
+        .version = "3   ",
 };
 #endif
 #endif

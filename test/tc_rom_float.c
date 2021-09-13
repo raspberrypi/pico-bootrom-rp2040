@@ -45,7 +45,7 @@ struct mufp_funcs {
     float (*mufp_fcos)(float);
     float (*mufp_fsin)(float);
     float (*mufp_ftan)(float);
-    uint32_t _broken_fatan2; //    float (*mufp_fatan2)(float, float);
+    float (*v3_mufp_fsincos)(float);
     float (*mufp_fexp)(float);
     float (*mufp_fln)(float);
 
@@ -232,7 +232,17 @@ int __attribute__((naked)) fcmp_from_fcmp_flags(float a, float b, int (*fmcp_fla
     );
 }
 
-#define check_fcmp_flags(a,b) check_int(fcmp(a, b), fcmp_from_fcmp_flags(a, b, mufp_funcs->mufp_fcmp)) // f_cmp is f_cmp_flags now
+float __attribute__((naked)) call_fsincos(float v, float *cout, float (*func)(float)) {
+    asm(
+    "push {r1, lr}\n"
+    "blx r2\n"
+    "pop {r2}\n"
+    "str r1, [r2]\n"
+    "pop {pc}\n"
+    );
+}
+
+#define check_fcmp_flags(a,b) check_int(fcmp(a, b), fcmp_from_fcmp_flags(a, b, (void (*)(float, float))mufp_funcs->mufp_fcmp)) // f_cmp is f_cmp_flags now
 #define check_fcmp_fast_flags(a,b) check_int(fcmp_fast(a, b), fcmp_from_fcmp_flags(a, b, mufp_funcs->mufp_fcmp_fast_flags))
 
 int main()
@@ -501,6 +511,15 @@ int main()
         check_float_fn1(float2double, -0.f);
     }
 
+    if (rom_version >= 3) {
+        for(float a = -0.3f; a<7.f; a += 0.137) {
+            float s = mufp_funcs->mufp_fsin(a);
+            float c = mufp_funcs->mufp_fcos(a);
+            float co=0;
+            float so = call_fsincos(a, &co, mufp_funcs->v3_mufp_fsincos);
+            ASSERT(so == s && co == c);
+        }
+    }
     printf("FLOAT OK\n");
 	return 0;
 }

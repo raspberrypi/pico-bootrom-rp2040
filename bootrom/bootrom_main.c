@@ -16,6 +16,7 @@
 #include "hardware/sync.h"
 #include "hardware/resets.h"
 #include "usb_boot_device.h"
+#include "resets.h"
 
 #include "async_task.h"
 #include "bootrom_crc32.h"
@@ -152,8 +153,7 @@ static void _usb_clock_setup() {
     //
     // Total postdiv of 25 means that too-fast xtal will push VCO out of
     // lockable range *before* clk_sys goes out of closure (factor of 1.88)
-    reset_block(RESETS_RESET_PLL_SYS_BITS);
-    unreset_block_wait(RESETS_RESET_PLL_SYS_BITS);
+    reset_unreset_block_wait_noinline(RESETS_RESET_PLL_SYS_BITS);
     pll_sys_hw->cs = 1u << PLL_CS_REFDIV_LSB;
     pll_sys_hw->fbdiv_int = 100;
     pll_sys_hw->prim =
@@ -183,10 +183,10 @@ void __noinline __attribute__((noreturn)) async_task_worker_thunk();
 
 static __noinline __attribute__((noreturn)) void _usb_boot(uint32_t _usb_activity_gpio_pin_mask,
                                                                   uint32_t disable_interface_mask) {
-    reset_block(RESETS_RESET_USBCTRL_BITS);
+    reset_block_noinline(RESETS_RESET_USBCTRL_BITS);
     if (!running_on_fpga())
         _usb_clock_setup();
-    unreset_block_wait(RESETS_RESET_USBCTRL_BITS);
+    unreset_block_wait_noinline(RESETS_RESET_USBCTRL_BITS);
 
     // Ensure timer and watchdog are running at approximately correct speed
     // (can't switch clk_ref to xosc at this time, as we might lose ability to resus)
@@ -228,8 +228,7 @@ int main() {
             RESETS_RESET_IO_QSPI_BITS |
             RESETS_RESET_PADS_QSPI_BITS |
             RESETS_RESET_TIMER_BITS;
-    reset_block(rst_mask);
-    unreset_block(rst_mask);
+    reset_unreset_block_wait_noinline(rst_mask);
 
     // Workaround for behaviour of TXB0108 bidirectional level shifters on
     // FPGA platform (JIRA PRJMU-726), not used on ASIC

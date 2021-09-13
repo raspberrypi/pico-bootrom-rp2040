@@ -47,8 +47,7 @@ struct mufp_funcs {
     double (*mufp_dcos)(double);
     double (*mufp_dsin)(double);
     double (*mufp_dtan)(double);
-    // since float doesn't use this slot, we don't either
-    uint32_t _not_fatan2; // double (*mufp_datan2)(double, double);
+    double (*v3_mufp_dsincos)(double);
     double (*mufp_dexp)(double);
     double (*mufp_dln)(double);
 
@@ -235,7 +234,17 @@ int __attribute__((naked)) dcmp_from_dcmp_flags(double a, double b, int (*dmcp_f
     );
 }
 
-#define check_dcmp_flags(a,b) check_int(dcmp(a, b), dcmp_from_dcmp_flags(a, b, mufp_funcs->mufp_dcmp)) // dcmp is dcmp_flags now
+double __attribute__((naked)) call_dsincos(double v, double *cout, double (*func)(double)) {
+    asm(
+    "push {r2, r4, lr}\n"
+    "blx r3\n"
+    "pop {r4}\n"
+    "stmia r4!, {r2, r3}\n"
+    "pop {r4, pc}\n"
+    );
+}
+
+#define check_dcmp_flags(a,b) check_int(dcmp(a, b), dcmp_from_dcmp_flags(a, b, (void (*)(double,double))mufp_funcs->mufp_dcmp)) // dcmp is dcmp_flags now
 #define check_dcmp_fast_flags(a,b) check_int(dcmp_fast(a, b), dcmp_from_dcmp_flags(a, b, mufp_funcs->mufp_dcmp_fast_flags))
 
 int main()
@@ -522,6 +531,15 @@ int main()
     check_double_fn1(double2float, 3.0e68);
     check_double_fn1(double2float, -3.0e68);
 
+    if (rom_version >= 3) {
+        for(double a = -0.3f; a<7.f; a += 0.137) {
+            double s = mufp_funcs->mufp_dsin(a);
+            double c = mufp_funcs->mufp_dcos(a);
+            double co=0;
+            double so = call_dsincos(a, &co, mufp_funcs->v3_mufp_dsincos);
+            ASSERT(so == s && co == c);
+        }
+    }
     printf("DOUBLE OK\n");
-	return 0;
+    return 0;
 }

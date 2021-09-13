@@ -131,6 +131,7 @@ static void _usb_dump_eps(void)
  * @param ep
  */
 static void _usb_reset_buffers(struct usb_endpoint *ep) {
+    uint32_t mask = 1u << ep->buffer_bit_index;
     if ((USB_BUF_CTRL_AVAIL * 0x10001) & *_usb_buf_ctrl_wide((ep))) {
         usb_debug("Must abort buffers %d %s owned=%d %08x!!!\n", ep->num, usb_endpoint_dir_string(ep),
                   ep->owned_buffer_count, (uint) *_usb_buf_ctrl_wide(
@@ -141,21 +142,24 @@ static void _usb_reset_buffers(struct usb_endpoint *ep) {
             ep->next_pid ^= 1u;
         }
         usb_dump_trace();
-        uint32_t mask = 1u << ep->buffer_bit_index;
-        usb_hw_clear->abort_done = mask;
+        // note we don't clear abort done here as there is no reason it should ever have been set
+        // and doing so at this point doesn't actually help because it takes an unkown number of cycles
+        // usb_hw_clr->abort = mask;
         usb_hw_set->abort = mask;
-        int count = 100000;
-        while (!(usb_hw->abort_done & mask) && --count) {
-            usb_hw_set->abort = mask;
-        }
-        if (!count) {
-            usb_warn("**** FAILED TO ABORT %d %s: %08x %08x\n", ep->num, usb_endpoint_dir_string(ep),
-                     (uint) usb_hw->abort, (uint) usb_hw->abort_done);
-        }
-        usb_hw_clear->abort = mask;
-        usb_hw_clear->abort_done = mask;
+        // being massively overly defensive here; we are not aware of any cases where abort done may not get
+        // set, however in the spirit of not hanging the chip, we prefer a (comparatively in USB times, lengthy)
+        // timeout.
+        // This should leave us in a good state as the host has likely given up, and the buf ctrl clear below
+        // will be done without any active state on the endpoint. What the host does if we were to timeout,
+        // we don't know (it depends what it was doing when it chose to reset us), however we will
+        // at least be back in a good state.
+        int count = 1u<<16u; // approx 4800000/8*65536 = 10ms
+        while (!(usb_hw->abort_done & mask) && --count);
     }
     *_usb_buf_ctrl_wide(ep) = 0;
+    // HW requires us to clear abort before abort done
+    usb_hw_clear->abort = mask;
+    usb_hw_clear->abort_done = mask;
     ep->owned_buffer_count = _ep_buffer_count(ep);
     usb_debug("clear current buffer %d %s\n", ep->num, usb_endpoint_dir_string(ep));
     ep->current_give_buffer = ep->current_take_buffer = 0;

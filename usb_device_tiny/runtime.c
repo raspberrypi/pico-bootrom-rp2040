@@ -74,8 +74,7 @@ void watchdog_reboot(uint32_t pc, uint32_t sp, uint32_t delay_ms) {
     // One of which will be the watchdog tick
     *((volatile uint32_t *) (PSM_BASE + PSM_WDSEL_OFFSET)) =
             PSM_WDSEL_BITS & ~(PSM_WDSEL_ROSC_BITS | PSM_WDSEL_XOSC_BITS);
-    hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_ENABLE_BITS);
-    hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_PAUSE_DBG0_BITS | WATCHDOG_CTRL_PAUSE_DBG1_BITS |
+    hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_ENABLE_BITS | WATCHDOG_CTRL_PAUSE_DBG0_BITS | WATCHDOG_CTRL_PAUSE_DBG1_BITS |
                                       WATCHDOG_CTRL_PAUSE_JTAG_BITS); // want to reboot even under debugger
     if (pc) {
         pc |= 1u; // thumb mode
@@ -131,10 +130,8 @@ static inline io_rw_32 *PAD_CTRL_REG(uint x) {
 
 void gpio_funcsel(uint i, int fn) {
     io_rw_32 *pad_ctl = PAD_CTRL_REG(i);
-    // Enable the input at the pad
-    *pad_ctl |= PADS_BANK0_GPIO0_IE_BITS;
-    // Take away the output disable at the pad
-    *pad_ctl &= (~PADS_BANK0_GPIO0_OD_BITS);
+    // we are only enabling output, so just clear the OD
+    hw_clear_bits(pad_ctl, PADS_BANK0_GPIO0_OD_BITS);
     // Set the funcsel
     *GPIO_CTRL_REG(i) = (fn << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB);
 }

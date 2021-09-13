@@ -29,6 +29,7 @@
 .global mufp_dsqrt
 .global mufp_dcos
 .global mufp_dsin
+.global mufp_dsincos
 .global mufp_dtan
 .global mufp_datan2
 .global mufp_dexp
@@ -1791,6 +1792,18 @@ mufp_dsin:
  bl pop_r8_r11
  pop {r4-r7,r15}
 
+.thumb_func
+mufp_dsincos:
+     push {r4-r7,r14}
+     bl push_r8_r11
+     bl dsincos
+     mov r12,r0                    @ save ε
+     bl dcos_finish
+     push {r0,r1}
+     mov r0,r12
+     bl dsin_finish
+     pop {r2,r3}
+     b 1b
 
 @ unpack double θ in r0:r1, range reduce and calculate ε, cos α and sin α such that
 @ θ=α+ε and |ε|≤2^-32

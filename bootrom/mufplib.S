@@ -44,6 +44,7 @@
 .global mufp_ufix642float
 .global mufp_fcos
 .global mufp_fsin
+.global mufp_fsincos
 .global mufp_ftan
 .global mufp_fatan2
 .global mufp_fexp
@@ -481,7 +482,9 @@ cordic_vec:
  b cordic_exit
 
 .thumb_func
-mufp_fsin:            @ calculate sin and cos using CORDIC rotation method
+mufp_fsin:
+.thumb_func
+mufp_fsincos:         @ calculate sin and cos using CORDIC rotation method
  push {r4,r5,r14}
  movs r1,#24
  bl mufp_float2fix    @ range reduction by repeated subtraction/addition in fixed point
